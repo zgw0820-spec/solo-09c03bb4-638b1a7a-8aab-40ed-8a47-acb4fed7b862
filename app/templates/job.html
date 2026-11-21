@@ -34,6 +34,58 @@
   <p><a href="{{ url_for('index') }}">← 返回首页</a></p>
 </div>
 
+{% if job.phase == 'done' %}
+<div class="card" id="maintenance">
+  <h2>检修排班</h2>
+  <p class="muted">
+    窗口为 UTC 半开区间：含起点、不含终点；同一台构建机的重叠窗口合并计算。
+    对任务所需且已有缓存的每个镜像层，任一时刻至少保留一台持有该层且未在检修的构建机；
+    会断档的登记/改期将被拒绝并保留原排班。排班保存在作业目录，服务重启后继续生效。
+  </p>
+  {% if maint_error %}<p class="alert">{{ maint_error }}</p>{% endif %}
+  <form method="post" action="{{ url_for('maintenance_create', job_id=job.job_id) }}">
+    <label>构建机</label>
+    <select name="machine" required>
+      {% for m in machines %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+    </select>
+    <label>开始（UTC）</label>
+    <input type="text" name="start" placeholder="2026-11-21 08:00" required>
+    <label>结束（UTC）</label>
+    <input type="text" name="end" placeholder="2026-11-21 10:00" required>
+    <button type="submit">登记窗口</button>
+  </form>
+
+  {% if maint_windows %}
+  <h2 style="margin-top:18px">已登记窗口（{{ maint_windows|length }}）</h2>
+  <table>
+    <tr><th>构建机</th><th>开始</th><th>结束</th><th>改期</th></tr>
+    {% for w in maint_windows %}
+    <tr>
+      <td><code>{{ w.machine }}</code></td>
+      <td>{{ w.start }}</td>
+      <td>{{ w.end }}</td>
+      <td>
+        <details>
+          <summary>改期</summary>
+          <form method="post"
+                action="{{ url_for('maintenance_reschedule', job_id=job.job_id, window_id=w.id) }}">
+            <label>新开始（UTC）</label>
+            <input type="text" name="start" value="{{ w.start_input }}" required>
+            <label>新结束（UTC）</label>
+            <input type="text" name="end" value="{{ w.end_input }}" required>
+            <button type="submit">提交改期</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">暂无检修窗口。</p>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if job.phase != 'done' and job.phase != 'failed' %}
 <script>
 async function refresh() {

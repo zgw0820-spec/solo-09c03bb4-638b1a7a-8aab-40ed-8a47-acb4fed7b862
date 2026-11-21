@@ -14,6 +14,9 @@ from flask import (Flask, Response, abort, redirect, render_template,
 from join_engine import (FINAL_RESULT_FILE, STATE_FILE, JoinError,
                          count_pairs_on_disk, load_state,
                          read_csv_header, run_join)
+from maintenance import (GapConflict, MaintenanceError, WindowNotFound,
+                         add_window, format_input, format_utc, list_machines,
+                         load_windows, parse_utc, reschedule_window)
 
 JOBS_ROOT = os.environ.get("JOBS_DIR", "/data/jobs")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 单次上传 50MB 上限
@@ -147,9 +150,64 @@ def upload() -> Response:
 
 
 @app.get("/jobs/<job_id>")
-def job_detail(job_id: str) -> str:
+def job_detail(job_id: str):
+    return _render_job(job_id)
+
+
+def _render_job(job_id: str, maint_error: str = None, status: int = 200):
+    """渲染作业页；已完成作业附带检修排班上下文（机器清单 + 已登记窗口）。"""
     summary = _job_summary(job_id)
-    return render_template("job.html", job=summary)
+    machines, windows = [], []
+    if summary["phase"] == "done":
+        jdir = _job_dir(job_id)
+        machines = list_machines(jdir)
+        windows = [
+            {"id": w.id, "machine": w.machine,
+             "start": format_utc(w.start), "end": format_utc(w.end),
+             "start_input": format_input(w.start),
+             "end_input": format_input(w.end)}
+            for w in sorted(load_windows(jdir),
+                            key=lambda w: (w.machine, w.start, w.id))]
+    return render_template("job.html", job=summary, maint_error=maint_error,
+                           machines=machines, maint_windows=windows), status
+
+
+def _require_done_job(job_id: str) -> str:
+    """检修排班只挂在已完成的配对作业上。"""
+    jdir = _job_dir(job_id)
+    if load_state(jdir).get("phase") != "done":
+        abort(409, description="配对完成后才能登记检修排班。")
+    return jdir
+
+
+@app.post("/jobs/<job_id>/maintenance")
+def maintenance_create(job_id: str):
+    jdir = _require_done_job(job_id)
+    try:
+        start = parse_utc(request.form.get("start"))
+        end = parse_utc(request.form.get("end"))
+        add_window(jdir, request.form.get("machine"), start, end)
+    except GapConflict as exc:
+        return _render_job(job_id, maint_error=str(exc), status=409)
+    except MaintenanceError as exc:
+        return _render_job(job_id, maint_error=str(exc), status=400)
+    return redirect(url_for("job_detail", job_id=job_id) + "#maintenance")
+
+
+@app.post("/jobs/<job_id>/maintenance/<window_id>/reschedule")
+def maintenance_reschedule(job_id: str, window_id: str):
+    jdir = _require_done_job(job_id)
+    try:
+        start = parse_utc(request.form.get("start"))
+        end = parse_utc(request.form.get("end"))
+        reschedule_window(jdir, window_id, start, end)
+    except WindowNotFound:
+        abort(404)
+    except GapConflict as exc:
+        return _render_job(job_id, maint_error=str(exc), status=409)
+    except MaintenanceError as exc:
+        return _render_job(job_id, maint_error=str(exc), status=400)
+    return redirect(url_for("job_detail", job_id=job_id) + "#maintenance")
 
 
 @app.get("/jobs/<job_id>/download")
